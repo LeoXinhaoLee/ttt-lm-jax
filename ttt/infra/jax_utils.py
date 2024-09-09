@@ -3,10 +3,9 @@ import math
 from typing import Any, Mapping, Text, Tuple, Union, NamedTuple
 from functools import partial
 import re
-import dataclasses
 import random
 from ml_collections import ConfigDict
-from ml_collections.config_dict.config_dict import placeholder
+from ml_collections.config_dict.config_dict import placeholder, ConfigDict
 
 import flax
 import jax
@@ -263,8 +262,9 @@ def cross_entropy_loss_and_accuracy(logits, tokens, valid=None):
     )
     token_log_prob = jnp.where(valid > 0.0, token_log_prob, jnp.array(0.0))
     loss = -jnp.mean(jnp.sum(token_log_prob, axis=-1) / valid_text_length)
-    correct = jnp.where(valid > 0.0, jnp.argmax(logits, axis=-1) == tokens, jnp.array(False))
-    accuracy = jnp.mean(jnp.sum(correct, axis=-1) / valid_text_length)
+    # correct = jnp.where(valid > 0.0, jnp.argmax(logits, axis=-1) == tokens, jnp.array(False))
+    # accuracy = jnp.mean(jnp.sum(correct, axis=-1) / valid_text_length)
+    accuracy = 0.  # Dummy value to save mem caused by retaining both logits and token_log_prob
     return loss, accuracy
 
 
@@ -390,6 +390,10 @@ def tree_apply(fns, tree):
     return jax.tree_util.tree_map(lambda fn, x: fn(x), fns, tree)
 
 
+def master_mkdir(path):
+    os.makedirs(path, mode=0o777, exist_ok=True)
+
+
 def master_print(msg, logger=None, end="\n"):
     if jax.process_index() == 0:
         print(msg, flush=True, end=end)
@@ -398,6 +402,31 @@ def master_print(msg, logger=None, end="\n"):
             if end == "\n":
                 logger.writelines("\n")
             logger.flush()
+
+
+def count_param(params, cnt_outer, cnt_inner, cnt_pos):
+    for k, v in params.items():
+        if isinstance(v, type(params)):
+            cnt_outer, cnt_inner, cnt_pos = count_param(v, cnt_outer, cnt_inner, cnt_pos)
+        else:
+            if 'ttt_dense' in k or 'ttt_bias' in k:
+                cnt_inner += v.size
+            elif 'embedding' in k:
+                cnt_pos += v.size
+            else:
+                cnt_outer += v.size
+    return cnt_outer, cnt_inner, cnt_pos
+
+
+def print_param_num(params, name, logger):
+    outer_param_count, inner_param_count, pos_embed_param_count = count_param(params, 0, 0, 0)
+    total_param_count = sum(x.size for x in jax.tree_util.tree_leaves(params))
+    master_print(f'\n{name} Module:', logger)
+    master_print('+Inner Param #: {}'.format(inner_param_count), logger)
+    master_print('+Outer Param #: {}'.format(outer_param_count), logger)
+    master_print('+Embed Param #: {}'.format(pos_embed_param_count), logger)
+    master_print('Total Param #: {}'.format(inner_param_count + outer_param_count), logger)
+    master_print('Total Param # (+pos/word): {}'.format(total_param_count), logger)
 
 
 def log_plot(fig, name, step):
@@ -426,3 +455,10 @@ def log_ttt_stats(layer, ttt_stats_layer, x_axis, step):
     ax.legend()
     log_plot(fig, f"Layer {layer + 1} TTT Loss", step)
     plt.close()
+
+
+def config_to_dict(config):
+  if isinstance(config, ConfigDict) or \
+     isinstance(config, dict):
+    return {k: config_to_dict(v) for k, v in config.items()}
+  return config

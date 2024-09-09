@@ -33,7 +33,9 @@ from ttt.infra.jax_utils import (
     with_sharding_constraint,
     master_print,
     log_ttt_stats,
+    print_param_num,
 )
+from ttt.infra.multi import MultiLogger
 
 
 FLAGS, FLAGS_DEF = mlxu.define_flags_with_default(
@@ -47,6 +49,9 @@ FLAGS, FLAGS_DEF = mlxu.define_flags_with_default(
     update_model_config="",
     save_checkpoint_freq=100,
     save_milestone_freq=0,
+    multi_log_freq=100,
+    wandb_project="Match-Titan",
+    wandb_entity="xil202",
     dataset_path="",
     dataset_name="the_pile",
     tokenizer_name="meta-llama/Llama-2-7b-hf",
@@ -271,6 +276,7 @@ def initialize_or_resume(
     shard_fns,
     sharded_create_trainstate_from_params,
     FLAGS,
+    multi,
 ):
     start_step = 1
     train_state, restored_params = None, None
@@ -303,6 +309,14 @@ def initialize_or_resume(
             )
             dataset_resume_dir = osp.join(FLAGS.exp_dir, FLAGS.resume_exp_name, dataset_pkl_filename)
             train_loader.sampler.load_state_dict(deepcopy(mlxu.load_pickle(dataset_resume_dir)))
+
+            multi_resume_dir = osp.join(FLAGS.exp_dir, FLAGS.exp_folder, FLAGS.resume_exp_name) + (
+                f"/{FLAGS.resume_step}" if FLAGS.resume_step else "")
+            if multi_resume_dir.is_dir():
+                multi.load(multi_resume_dir)
+            else:
+                master_print(f"Multi resume dir {multi_resume_dir} not found.")
+                exit(0)
 
         if FLAGS.is_rollback_reshuffle:
             train_loader.sampler.is_rollback = True
@@ -369,11 +383,22 @@ def main(argv):
     model_config.max_sequence_length = seq_length
     flags_config_dict.model_config = model_config
 
-    # Create WandB run and checkpointer
+    # Create WandB / Multi run and checkpointer
     if master_process:
-        wandb.init(entity="xil202", project="Match-Titan", config=flags_config_dict, name=FLAGS.exp_name)
+        wandb.init(
+            project=FLAGS.wandb_project,
+            entity=FLAGS.wandb_entity,
+            config=flags_config_dict,
+            group=FLAGS.exp_folder,
+            name=FLAGS.exp_name,
+        )
+    multi_dir = osp.join(FLAGS.exp_dir, FLAGS.exp_folder, FLAGS.exp_name)
+    multi = MultiLogger(multi_dir, flags_config_dict, model_config.to_dict())
     ckpt_dir = osp.join(FLAGS.exp_dir, FLAGS.exp_name)
     checkpointer = StreamingCheckpointer(FLAGS.checkpointer, ckpt_dir, enable=master_process)
+
+    dev_info = f"Process # {process_num}\tLocal dev # {local_dev_num}\tTotal dev # {global_dev_num}"
+    master_print(dev_info, logger=multi.local_logger)
 
     # Create model and optimizer
     model = CausalLM(model_config, dtype=get_float_dtype_by_name(FLAGS.dtype))
@@ -411,7 +436,10 @@ def main(argv):
             shard_fns,
             sharded_create_trainstate_from_params,
             FLAGS,
+            multi
         )
+
+        print_param_num(params=train_state.params, name="Entire Model", logger=multi.local_logger)
 
         if FLAGS.eval_mode:
             eval_step = make_eval_step_fn(model, model_config)
@@ -432,9 +460,10 @@ def main(argv):
                 eval_metric_list.append(eval_metrics)
 
             val_loss_avg = average_metrics(process_allgather(eval_metric_list))["eval_loss"].item()
-            master_print(f"Eval Loss: {val_loss_avg:.4f}")
+            master_print(f"Eval Loss: {val_loss_avg:.4f}", logger=multi.local_logger)
             exit(0)
 
+        metrics = []
         train_loader_iterator = iter(train_loader)
 
         for step in tqdm(
@@ -447,6 +476,7 @@ def main(argv):
             try:
                 batch = next(train_loader_iterator)
             except StopIteration:
+                master_print(f"Resetting train loader iterator at step {step}", logger=multi.local_logger)
                 train_loader.sampler.counter = 0
                 train_loader_iterator = iter(train_loader)
                 batch = next(train_loader_iterator)
@@ -483,6 +513,19 @@ def main(argv):
                 train_state, sharded_rng, batch, ttt_lr_mult, output_ttt_stats
             )
 
+            # Log Multi
+            metrics.append({
+                "loss": loss.item(),
+                "gradient_norm": grads_norm.item(),
+                "learning_rate": learning_rate.item()
+            })
+            if step % FLAGS.multi_log_freq == 0 or step % FLAGS.save_milestone_freq == 0 or step == FLAGS.total_steps:
+                metrics = jax.device_get(metrics)
+                multi.update_metrics(metrics)
+                multi.save(milestone=step if step % FLAGS.save_milestone_freq == 0 else None, ttt_stats=ttt_stats)
+                del metrics
+                metrics = []
+
             if master_process:
                 wandb.log(
                     {
@@ -507,7 +550,7 @@ def main(argv):
                 save_checkpoint(train_state, train_loader, step % FLAGS.save_milestone_freq == 0)
 
             if step == FLAGS.total_steps:
-                master_print("Training has completed!")
+                master_print("Training has completed!", logger=multi.local_logger)
 
 
 if __name__ == "__main__":
