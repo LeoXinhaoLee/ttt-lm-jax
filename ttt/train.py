@@ -371,7 +371,7 @@ def main(argv):
 
     # Create WandB run and checkpointer
     if master_process:
-        wandb.init(project="TTT-LM", config=flags_config_dict, name=FLAGS.exp_name)
+        wandb.init(entity="xil202", project="Match-Titan", config=flags_config_dict, name=FLAGS.exp_name)
     ckpt_dir = osp.join(FLAGS.exp_dir, FLAGS.exp_name)
     checkpointer = StreamingCheckpointer(FLAGS.checkpointer, ckpt_dir, enable=master_process)
 
