@@ -62,6 +62,7 @@ FLAGS, FLAGS_DEF = mlxu.define_flags_with_default(
     optimizer=OptimizerFactory.get_default_config(),
     checkpointer=StreamingCheckpointer.get_default_config(),
     exp_dir="",
+    exp_folder="",
     exp_name="",
     resume_exp_name="",
     resume_step="",
@@ -287,6 +288,7 @@ def initialize_or_resume(
             + "::"
             + osp.join(
                 FLAGS.exp_dir,
+                FLAGS.exp_folder,
                 FLAGS.resume_exp_name,
                 (
                     f"step_{int(FLAGS.resume_step)}/streaming_train_state_{int(FLAGS.resume_step)}"
@@ -307,7 +309,12 @@ def initialize_or_resume(
                 if FLAGS.resume_step
                 else "dataset.pkl"
             )
-            dataset_resume_dir = osp.join(FLAGS.exp_dir, FLAGS.resume_exp_name, dataset_pkl_filename)
+            dataset_resume_dir = osp.join(
+                FLAGS.exp_dir,
+                FLAGS.exp_folder,
+                FLAGS.resume_exp_name,
+                dataset_pkl_filename
+            )
             train_loader.sampler.load_state_dict(deepcopy(mlxu.load_pickle(dataset_resume_dir)))
 
             multi_resume_dir = osp.join(FLAGS.exp_dir, FLAGS.exp_folder, FLAGS.resume_exp_name) + (
