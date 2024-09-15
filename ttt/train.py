@@ -1,3 +1,5 @@
+import pdb
+
 import mlxu
 import wandb
 import os.path as osp
@@ -447,6 +449,8 @@ def main(argv):
         )
 
         print_param_num(params=train_state.params, name="Entire Model", logger=multi.local_logger)
+        # save_checkpoint(train_state, train_loader, milestone=True)  # @xinhao: save init to convert to pytorch
+        # exit(0)
 
         if FLAGS.eval_mode:
             eval_step = make_eval_step_fn(model, model_config)
